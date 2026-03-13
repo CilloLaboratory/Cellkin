@@ -84,15 +84,19 @@ cellkin-genotype \
   --variants variants.parquet \
   --out genotypes.parquet
 
+# Output from this step includes a distance matrix and an nj tree
+# Distance matrix can be used for coarse assessment of phylogeny
+cellkin-build-nj \
+  --genotypes genotypes.parquet \
+  --out-prefix nj
+
+# Optional: identification of clones
 cellkin-clone-phylogeny \
   --genotypes genotypes.parquet \
   --out clones.tsv \
   --tree tree.newick
 
-cellkin-build-nj \
-  --genotypes genotypes.parquet \
-  --out-prefix nj
-
+# Optional: report file summarizing clonal structure
 cellkin-qc-report \
   --pileup pileup.parquet \
   --genotypes genotypes.parquet \
