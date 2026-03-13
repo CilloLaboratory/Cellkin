@@ -3,6 +3,15 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# macOS filesystem metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
 # C extensions
 *.so
 
@@ -138,6 +147,8 @@ celerybeat.pid
 .env
 .envrc
 .venv
+.venv/
+.venv*/
 env/
 venv/
 ENV/
