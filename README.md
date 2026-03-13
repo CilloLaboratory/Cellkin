@@ -114,6 +114,28 @@ Expected outputs include:
 - `nj.tree.newick`: cell-level NJ tree (`cellkin-build-nj`)
 - `qc/index.html`: QC report
 
+## Scaling options
+
+For larger cohorts, two optional guardrails/output modes are available:
+
+```bash
+# Write pairwise distances in long/condensed form (smaller than full NxN matrix)
+cellkin-build-nj \
+  --genotypes genotypes.parquet \
+  --out-prefix nj \
+  --distance-format condensed
+
+# Prevent accidental very-large agglomerative clustering
+cellkin-clone-phylogeny \
+  --genotypes genotypes.parquet \
+  --out clones.tsv \
+  --tree tree.newick \
+  --max-cells-for-clustering 20000
+```
+
+`--distance-format square` remains the default behavior.
+`--max-cells-for-clustering 0` (default) disables the guardrail.
+
 ## Using a cell barcode whitelist
 
 `cellkin-extract-chrm` supports barcode filtering directly:
@@ -137,4 +159,25 @@ cellkin-extract-chrm --bam in.bam --fasta ref.fa --out chrM.bam \
 # Whitelist has AAAC...-1, BAM CB has AAAC...
 cellkin-extract-chrm --bam in.bam --fasta ref.fa --out chrM.bam \
   --whitelist barcodes.tsv.gz --strip-whitelist-suffix
+```
+
+## Benchmark harness
+
+A synthetic benchmark harness is available at:
+
+- `tests/benchmarks/benchmark_pipeline.py`
+
+Example:
+
+```bash
+python tests/benchmarks/benchmark_pipeline.py --cells 1000 --sites 200 --out-json benchmark.json
+```
+
+To compare against a previous baseline run:
+
+```bash
+python tests/benchmarks/benchmark_pipeline.py \
+  --cells 1000 --sites 200 \
+  --baseline-json baseline.json \
+  --out-json current.json
 ```
