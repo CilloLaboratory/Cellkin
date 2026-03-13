@@ -63,6 +63,13 @@ cellkin-extract-chrm \
   --out chrM.bam \
   --mito-chr chrM
 
+# Optional: restrict to a barcode whitelist (e.g., cell type subset)
+cellkin-extract-chrm \
+  --bam your.bam \
+  --fasta ref.fa \
+  --out chrM.celltype.bam \
+  --whitelist barcodes.tsv.gz
+
 cellkin-umi-pileup \
   --bam chrM.bam \
   --fasta ref.fa \
@@ -102,3 +109,28 @@ Expected outputs include:
 - `tree.newick`: clone tree
 - `nj.tree.newick`: cell-level NJ tree (`cellkin-build-nj`)
 - `qc/index.html`: QC report
+
+## Using a cell barcode whitelist
+
+`cellkin-extract-chrm` supports barcode filtering directly:
+
+- `--whitelist <path>`: one barcode per line (plain text or `.gz`, e.g. `barcodes.tsv.gz`)
+- `--strip-whitelist-suffix`: strips `-1`, `-2`, etc. from whitelist entries before matching
+- `--strip-bam-suffix`: strips `-1`, `-2`, etc. from BAM `CB` tags before matching
+
+Use these suffix flags when one side includes 10x-style suffixes and the other does not.
+
+Examples:
+
+```bash
+# Whitelist has AAAC...-1, BAM CB has AAAC...-1
+cellkin-extract-chrm --bam in.bam --fasta ref.fa --out chrM.bam --whitelist barcodes.tsv.gz
+
+# Whitelist has AAAC..., BAM CB has AAAC...-1
+cellkin-extract-chrm --bam in.bam --fasta ref.fa --out chrM.bam \
+  --whitelist barcodes.tsv --strip-bam-suffix
+
+# Whitelist has AAAC...-1, BAM CB has AAAC...
+cellkin-extract-chrm --bam in.bam --fasta ref.fa --out chrM.bam \
+  --whitelist barcodes.tsv.gz --strip-whitelist-suffix
+```
