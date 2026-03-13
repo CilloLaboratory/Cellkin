@@ -111,6 +111,7 @@ Expected outputs include:
 - `genotypes.parquet`: per-cell genotypes and VAF
 - `clones.tsv`: clone membership summaries
 - `tree.newick`: clone tree
+- `nj.distance.csv` or `nj.distance.condensed.csv`: cell-level pairwise distance matrix (`cellkin-build-nj`)
 - `nj.tree.newick`: cell-level NJ tree (`cellkin-build-nj`)
 - `qc/index.html`: QC report
 
