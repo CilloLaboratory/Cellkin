@@ -1,6 +1,14 @@
-import argparse, sys
-import pandas as pd, numpy as np
+import argparse
+import sys
+
+import numpy as np
+import pandas as pd
+
 from .io_utils import read_parquet, write_parquet
+
+
+BASES = ["A", "C", "G", "T"]
+
 
 def main():
     ap = argparse.ArgumentParser(description="Joint candidate discovery from pileup.")
@@ -12,29 +20,46 @@ def main():
 
     df = read_parquet(args.pileup)
     if df.empty:
-        pd.DataFrame(columns=["pos","ref","alt","n_cells_alt","tot_umi"]).to_parquet(args.out, index=False); return
+        write_parquet(pd.DataFrame(columns=["pos", "ref", "alt", "n_cells_alt", "tot_umi"]), args.out)
+        return
 
-    agg = df.groupby("pos").agg({"A":"sum","C":"sum","G":"sum","T":"sum","umi_total":"sum"}).reset_index()
-    acgt = agg[["A","C","G","T"]].values
+    agg = (
+        df.groupby("pos", as_index=False)
+        .agg({"A": "sum", "C": "sum", "G": "sum", "T": "sum", "umi_total": "sum"})
+        .rename(columns={"umi_total": "tot_umi"})
+    )
+
+    acgt = agg[BASES].to_numpy()
     ref_idx = np.argmax(acgt, axis=1)
-    ref_base = np.array(list("ACGT"))[ref_idx]
-    candidates = []
-    for i, row in agg.iterrows():
-        pos = int(row["pos"])
-        counts = {b:int(row[b]) for b in "ACGT"}
-        rb = ref_base[i]
-        for b in "ACGT":
-            if b == rb: continue
-            alt = counts[b]
-            if alt <= 0: continue
-            tot = int(row["umi_total"])
-            if tot < args.min_site_depth: continue
-            cell_support = ((df["pos"]==pos) & (df[b]>0)).sum()
-            if cell_support >= args.min_alt_cells:
-                candidates.append(dict(pos=pos, ref=rb, alt=b, n_cells_alt=int(cell_support), tot_umi=tot))
-    cand_df = pd.DataFrame(candidates).drop_duplicates(subset=["pos","alt"])
-    write_parquet(cand_df, args.out)
-    print(f"Wrote {len(cand_df)} candidates to {args.out}", file=sys.stderr)
+    agg["ref"] = np.array(BASES, dtype=object)[ref_idx]
+
+    # Precompute per-site, per-base count of cells with non-zero support.
+    support_df = (
+        df.assign(A=df["A"] > 0, C=df["C"] > 0, G=df["G"] > 0, T=df["T"] > 0)
+        .groupby("pos", as_index=False)[BASES]
+        .sum()
+    )
+    support_long = support_df.melt(id_vars="pos", value_vars=BASES, var_name="alt", value_name="n_cells_alt")
+
+    counts_long = agg[["pos", "ref", "tot_umi"] + BASES].melt(
+        id_vars=["pos", "ref", "tot_umi"], value_vars=BASES, var_name="alt", value_name="alt_count"
+    )
+
+    cand = counts_long.merge(support_long, on=["pos", "alt"], how="left")
+    cand["n_cells_alt"] = cand["n_cells_alt"].fillna(0).astype(int)
+
+    cand = cand[
+        (cand["alt"] != cand["ref"])
+        & (cand["alt_count"] > 0)
+        & (cand["tot_umi"] >= args.min_site_depth)
+        & (cand["n_cells_alt"] >= args.min_alt_cells)
+    ]
+
+    out = cand[["pos", "ref", "alt", "n_cells_alt", "tot_umi"]].drop_duplicates(subset=["pos", "alt"])
+    out = out.sort_values(["pos", "alt"]).reset_index(drop=True)
+    write_parquet(out, args.out)
+    print(f"Wrote {len(out)} candidates to {args.out}", file=sys.stderr)
+
 
 if __name__ == "__main__":
     main()
