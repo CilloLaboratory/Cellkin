@@ -1,4 +1,5 @@
 import argparse
+import os
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -17,6 +18,12 @@ def load_genotypes(path: str) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Missing required columns in {path}: {missing}")
     return df
+
+
+def estimate_problem_shape(df: pd.DataFrame) -> Tuple[int, int]:
+    n_cells = int(df["cell"].nunique())
+    n_sites = int(df[["pos", "alt"]].drop_duplicates().shape[0])
+    return n_cells, n_sites
 
 
 def make_vaf_matrix(df: pd.DataFrame, min_depth_for_call: int = 0) -> Tuple[pd.DataFrame, pd.DataFrame, List[str], List[str]]:
@@ -70,6 +77,26 @@ def _pairwise_block_distance(
     return out
 
 
+def _iter_distance_blocks(
+    X: np.ndarray,
+    Dmat: np.ndarray,
+    min_depth_pair: int,
+    weight_scheme: str,
+    block_size: int,
+):
+    n = X.shape[0]
+    for i0 in range(0, n, block_size):
+        i1 = min(i0 + block_size, n)
+        Xi = X[i0:i1]
+        Di = Dmat[i0:i1]
+        for j0 in range(i0, n, block_size):
+            j1 = min(j0 + block_size, n)
+            Xj = X[j0:j1]
+            Dj = Dmat[j0:j1]
+            block = _pairwise_block_distance(Xi, Di, Xj, Dj, min_depth_pair, weight_scheme)
+            yield i0, i1, j0, j1, block
+
+
 def pairwise_depth_weighted_absdiff(
     vaf: pd.DataFrame,
     dep: pd.DataFrame,
@@ -90,27 +117,176 @@ def pairwise_depth_weighted_absdiff(
     labels = list(vaf.index.astype(str))
 
     D = np.zeros((n, n), dtype=np.float64)
-    for i0 in range(0, n, block_size):
-        i1 = min(i0 + block_size, n)
-        Xi = X[i0:i1]
-        Di = Dmat[i0:i1]
+    max_finite = np.nan
 
-        for j0 in range(i0, n, block_size):
-            j1 = min(j0 + block_size, n)
-            Xj = X[j0:j1]
-            Dj = Dmat[j0:j1]
-            block = _pairwise_block_distance(Xi, Di, Xj, Dj, min_depth_pair, weight_scheme)
-            D[i0:i1, j0:j1] = block
-            if i0 != j0:
-                D[j0:j1, i0:i1] = block.T
+    for i0, i1, j0, j1, block in _iter_distance_blocks(X, Dmat, min_depth_pair, weight_scheme, block_size):
+        D[i0:i1, j0:j1] = block
+        if i0 != j0:
+            D[j0:j1, i0:i1] = block.T
+            vals = block.ravel()
+        else:
+            tri = np.triu_indices(block.shape[0], k=1)
+            vals = block[tri]
 
-    # Handle pairs with no overlap: set to max observed distance or 1.0 (conservative).
-    tri = np.triu_indices(n, k=1)
-    finite_vals = D[tri][np.isfinite(D[tri])]
-    fallback = np.max(finite_vals) if finite_vals.size > 0 else 1.0
+        finite = vals[np.isfinite(vals)]
+        if finite.size > 0:
+            block_max = float(np.max(finite))
+            if not np.isfinite(max_finite) or block_max > max_finite:
+                max_finite = block_max
+
+    fallback = max_finite if np.isfinite(max_finite) else 1.0
     D[~np.isfinite(D)] = fallback
     np.fill_diagonal(D, 0.0)
     return D, labels
+
+
+def write_condensed_distance(path: str, D: np.ndarray, labels: List[str]) -> None:
+    rows = []
+    n = len(labels)
+    for i in range(n):
+        for j in range(i + 1, n):
+            rows.append((labels[i], labels[j], D[i, j]))
+    pd.DataFrame(rows, columns=["cell_i", "cell_j", "distance"]).to_csv(path, index=False)
+
+
+def stream_condensed_distance(
+    path: str,
+    vaf: pd.DataFrame,
+    dep: pd.DataFrame,
+    min_depth_pair: int,
+    weight_scheme: str,
+    block_size: int,
+) -> Tuple[int, float]:
+    X = vaf.to_numpy(dtype=np.float64, copy=False)
+    Dmat = dep.to_numpy(dtype=np.float64, copy=False)
+    labels = np.asarray(vaf.index.astype(str))
+
+    max_finite = np.nan
+    for i0, i1, j0, j1, block in _iter_distance_blocks(X, Dmat, min_depth_pair, weight_scheme, block_size):
+        if i0 == j0:
+            tri = np.triu_indices(block.shape[0], k=1)
+            vals = block[tri]
+        else:
+            vals = block.ravel()
+        finite = vals[np.isfinite(vals)]
+        if finite.size > 0:
+            block_max = float(np.max(finite))
+            if not np.isfinite(max_finite) or block_max > max_finite:
+                max_finite = block_max
+
+    fallback = max_finite if np.isfinite(max_finite) else 1.0
+
+    first = True
+    n_pairs = 0
+    for i0, i1, j0, j1, block in _iter_distance_blocks(X, Dmat, min_depth_pair, weight_scheme, block_size):
+        if i0 == j0:
+            tri_i, tri_j = np.triu_indices(block.shape[0], k=1)
+            if tri_i.size == 0:
+                continue
+            dist = block[tri_i, tri_j]
+            dist = np.where(np.isfinite(dist), dist, fallback)
+            cell_i = labels[i0:i1][tri_i]
+            cell_j = labels[j0:j1][tri_j]
+        else:
+            bi, bj = block.shape
+            row_idx = np.repeat(np.arange(bi), bj)
+            col_idx = np.tile(np.arange(bj), bi)
+            dist = block.ravel()
+            dist = np.where(np.isfinite(dist), dist, fallback)
+            cell_i = labels[i0:i1][row_idx]
+            cell_j = labels[j0:j1][col_idx]
+
+        out = pd.DataFrame({"cell_i": cell_i, "cell_j": cell_j, "distance": dist})
+        out.to_csv(path, index=False, mode="w" if first else "a", header=first)
+        first = False
+        n_pairs += len(out)
+
+    if first:
+        pd.DataFrame(columns=["cell_i", "cell_j", "distance"]).to_csv(path, index=False)
+
+    return n_pairs, fallback
+
+
+def _system_memory_bytes() -> int | None:
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        phys_pages = os.sysconf("SC_PHYS_PAGES")
+        if page_size > 0 and phys_pages > 0:
+            return int(page_size * phys_pages)
+    except (ValueError, OSError, AttributeError):
+        return None
+    return None
+
+
+def _fmt_gb(num_bytes: float) -> str:
+    return f"{num_bytes / (1024**3):.1f} GB"
+
+
+def estimate_peak_memory_bytes(
+    n_cells: int,
+    n_sites: int,
+    block_size: int,
+    large_scale_mode: bool,
+    build_tree: bool,
+    distance_format: str,
+) -> float:
+    dense_inputs = float(16 * n_cells * n_sites)  # X + Dmat float64
+    block_temps = float((17 * block_size * block_size * n_sites) + (24 * block_size * block_size))
+
+    if large_scale_mode:
+        return dense_inputs + block_temps
+
+    dense_distance = float(8 * n_cells * n_cells)  # D
+    nj_copy = float(8 * n_cells * n_cells) if build_tree else 0.0
+    output_copy = float(8 * n_cells * n_cells) if distance_format == "square" else 0.0
+    return dense_inputs + block_temps + dense_distance + nj_copy + output_copy
+
+
+def preflight_or_die(
+    n_cells: int,
+    n_sites: int,
+    block_size: int,
+    large_scale_mode: bool,
+    build_tree: bool,
+    distance_format: str,
+    max_memory_gb: float | None,
+) -> None:
+    est = estimate_peak_memory_bytes(
+        n_cells=n_cells,
+        n_sites=n_sites,
+        block_size=block_size,
+        large_scale_mode=large_scale_mode,
+        build_tree=build_tree,
+        distance_format=distance_format,
+    )
+
+    if max_memory_gb is not None:
+        budget = max_memory_gb * (1024**3)
+        budget_label = f"--max-memory-gb={max_memory_gb}"
+    else:
+        total_mem = _system_memory_bytes()
+        if total_mem is None:
+            return
+        budget = total_mem * 0.80
+        budget_label = "80% of detected system RAM"
+
+    if est <= budget:
+        return
+
+    tips = [
+        "use --large-scale-mode --distance-format condensed",
+        "increase --min-depth-for-call and/or --min-depth-pair to reduce effective density",
+        "reduce --block-size (e.g. 32) to lower temporary block allocations",
+    ]
+    if build_tree:
+        tips.insert(0, "disable tree generation with --no-tree")
+
+    raise SystemExit(
+        "Preflight memory check failed for cellkin-build-nj. "
+        f"Estimated peak memory is {_fmt_gb(est)} for ~{n_cells:,} cells x {n_sites:,} sites, "
+        f"which exceeds {budget_label} ({_fmt_gb(budget)}). "
+        "Suggested mitigations: " + "; ".join(tips)
+    )
 
 
 class NJNode:
@@ -128,7 +304,7 @@ class NJNode:
         return "(" + ",".join(parts) + ")"
 
 
-def neighbor_joining(D: np.ndarray, labels: List[str]) -> NJNode:
+def neighbor_joining(D: np.ndarray, labels: List[str], copy_matrix: bool = True) -> NJNode:
     """
     Classic NJ (Saitou & Nei 1987) for additive distance matrices.
     D: NxN symmetric distance matrix
@@ -136,7 +312,7 @@ def neighbor_joining(D: np.ndarray, labels: List[str]) -> NJNode:
     Returns root NJNode (unrooted tree; we return a bifurcating structure with a phantom root).
     """
     labels = list(labels)
-    D = D.astype(float).copy()
+    D = D.astype(float, copy=copy_matrix)
 
     nodes: Dict[str, NJNode] = {lab: NJNode(lab) for lab in labels}
     active_idx = list(range(len(labels)))
@@ -197,15 +373,6 @@ def neighbor_joining(D: np.ndarray, labels: List[str]) -> NJNode:
     return root
 
 
-def write_condensed_distance(path: str, D: np.ndarray, labels: List[str]) -> None:
-    rows = []
-    n = len(labels)
-    for i in range(n):
-        for j in range(i + 1, n):
-            rows.append((labels[i], labels[j], D[i, j]))
-    pd.DataFrame(rows, columns=["cell_i", "cell_j", "distance"]).to_csv(path, index=False)
-
-
 def main():
     ap = argparse.ArgumentParser(description="Build cell-level NJ tree from genotypes.parquet (mt VAFs).")
     ap.add_argument("--genotypes", required=True, help="Path to genotypes.parquet")
@@ -234,13 +401,78 @@ def main():
         default="square",
         help="Distance output format: square matrix CSV (default) or condensed edge list CSV.",
     )
+    ap.add_argument(
+        "--block-size",
+        type=int,
+        default=64,
+        help="Block size for pairwise distance computation. Lower reduces peak temp memory.",
+    )
+    ap.add_argument(
+        "--large-scale-mode",
+        action="store_true",
+        help="Avoid full NxN distance materialization by streaming condensed distances; disables NJ tree generation.",
+    )
+    ap.add_argument(
+        "--max-memory-gb",
+        type=float,
+        default=None,
+        help="Hard budget for preflight memory estimate. If omitted, uses ~80% of detected system RAM.",
+    )
+    ap.add_argument(
+        "--no-tree",
+        action="store_true",
+        help="Skip NJ tree construction and write an empty placeholder tree (();) to save memory/time.",
+    )
     args = ap.parse_args()
 
+    if args.block_size <= 0:
+        raise SystemExit("--block-size must be > 0")
+
+    if args.large_scale_mode and args.distance_format != "condensed":
+        raise SystemExit("--large-scale-mode requires --distance-format condensed")
+
     df = load_genotypes(args.genotypes)
-    vaf, dep, _, sites = make_vaf_matrix(df, min_depth_for_call=args.min_depth_for_call)
+    n_cells, n_sites = estimate_problem_shape(df)
+
+    build_tree = not args.no_tree and not args.large_scale_mode
+    preflight_or_die(
+        n_cells=n_cells,
+        n_sites=n_sites,
+        block_size=args.block_size,
+        large_scale_mode=args.large_scale_mode,
+        build_tree=build_tree,
+        distance_format=args.distance_format,
+        max_memory_gb=args.max_memory_gb,
+    )
+
+    vaf, dep, labels, sites = make_vaf_matrix(df, min_depth_for_call=args.min_depth_for_call)
     vaf.to_parquet(f"{args.out_prefix}.vaf_matrix.parquet", index=True)
 
-    D, labels = pairwise_depth_weighted_absdiff(vaf, dep, min_depth_pair=args.min_depth_pair, weight_scheme=args.weight_scheme)
+    if args.large_scale_mode:
+        distance_path = f"{args.out_prefix}.distance.condensed.csv"
+        n_pairs, fallback = stream_condensed_distance(
+            distance_path,
+            vaf,
+            dep,
+            min_depth_pair=args.min_depth_pair,
+            weight_scheme=args.weight_scheme,
+            block_size=args.block_size,
+        )
+        with open(f"{args.out_prefix}.tree.newick", "w") as f:
+            f.write("();")
+        print(
+            f"[nj] large-scale mode enabled; streamed {n_pairs:,} pair distances to {distance_path}; "
+            f"tree generation skipped (wrote placeholder tree). fallback_distance={fallback:.6f}"
+        )
+        return
+
+    D, labels = pairwise_depth_weighted_absdiff(
+        vaf,
+        dep,
+        min_depth_pair=args.min_depth_pair,
+        weight_scheme=args.weight_scheme,
+        block_size=args.block_size,
+    )
 
     if args.distance_format == "square":
         distance_path = f"{args.out_prefix}.distance.csv"
@@ -249,10 +481,14 @@ def main():
         distance_path = f"{args.out_prefix}.distance.condensed.csv"
         write_condensed_distance(distance_path, D, labels)
 
-    root = neighbor_joining(D, labels)
-    newick = root.newick() + ";"
-    with open(f"{args.out_prefix}.tree.newick", "w") as f:
-        f.write(newick)
+    if build_tree:
+        root = neighbor_joining(D, labels, copy_matrix=False)
+        newick = root.newick() + ";"
+        with open(f"{args.out_prefix}.tree.newick", "w") as f:
+            f.write(newick)
+    else:
+        with open(f"{args.out_prefix}.tree.newick", "w") as f:
+            f.write("();")
 
     print(
         f"[nj] cells={len(labels)} sites={len(sites)}  min_depth_for_call={args.min_depth_for_call}  "

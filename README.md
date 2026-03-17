@@ -126,6 +126,14 @@ cellkin-build-nj \
   --out-prefix nj \
   --distance-format condensed
 
+# Large-scale mode: stream condensed distances without full NxN materialization
+cellkin-build-nj \
+  --genotypes genotypes.parquet \
+  --out-prefix nj \
+  --distance-format condensed \
+  --large-scale-mode \
+  --block-size 32
+
 # Prevent accidental very-large agglomerative clustering
 cellkin-clone-phylogeny \
   --genotypes genotypes.parquet \
@@ -136,6 +144,18 @@ cellkin-clone-phylogeny \
 
 `--distance-format square` remains the default behavior.
 `--max-cells-for-clustering 0` (default) disables the guardrail.
+
+For `cellkin-build-nj`, a preflight memory check runs before matrix construction.
+You can set an explicit budget with `--max-memory-gb` to force a hard stop before OOM:
+
+```bash
+cellkin-build-nj \
+  --genotypes genotypes.parquet \
+  --out-prefix nj \
+  --max-memory-gb 64
+```
+
+In `--large-scale-mode`, NJ tree generation is skipped and a placeholder tree (`();`) is written.
 
 ## Using a cell barcode whitelist
 
