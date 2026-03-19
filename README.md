@@ -159,7 +159,9 @@ cellkin-build-nj \
 
 In `--large-scale-mode`, NJ tree generation is skipped and a placeholder tree (`();`) is written.
 
-To reduce fallback distances driven by sparse coverage, filter to cohort-represented sites:
+## Variant filtering
+
+To distances problems induced by sparse coverage, filter to cohort-represented sites:
 
 - `--min-site-call-rate`: minimum fraction of cells with callable depth at a site
 - `--min-site-cells`: minimum number of cells with callable depth
