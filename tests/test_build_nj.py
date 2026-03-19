@@ -100,3 +100,94 @@ def test_build_nj_preflight_budget_error(tmp_path, monkeypatch):
 
     with pytest.raises(SystemExit, match="Preflight memory check failed"):
         build_nj_main()
+
+
+def test_build_nj_site_filtering(tmp_path, monkeypatch):
+    genotypes = pd.DataFrame(
+        [
+            {"cell": "c1", "pos": 100, "alt": "G", "vaf": 0.2, "depth": 10},
+            {"cell": "c2", "pos": 100, "alt": "G", "vaf": 0.8, "depth": 10},
+            {"cell": "c3", "pos": 100, "alt": "G", "vaf": 0.5, "depth": 10},
+            {"cell": "c1", "pos": 200, "alt": "T", "vaf": 1.0, "depth": 10},
+            {"cell": "c2", "pos": 200, "alt": "T", "vaf": 1.0, "depth": 0},
+            {"cell": "c3", "pos": 200, "alt": "T", "vaf": 1.0, "depth": 0},
+        ]
+    )
+
+    gpath = tmp_path / "genotypes.parquet"
+    out_prefix = tmp_path / "nj"
+    genotypes.to_parquet(gpath, index=False)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "build_nj.py",
+            "--genotypes",
+            str(gpath),
+            "--out-prefix",
+            str(out_prefix),
+            "--min-site-call-rate",
+            "0.9",
+        ],
+    )
+    build_nj_main()
+
+    vaf_matrix = pd.read_parquet(tmp_path / "nj.vaf_matrix.parquet")
+    assert list(vaf_matrix.columns) == ["100:G"]
+
+
+def test_build_nj_no_overlap_safeguard_regular_mode(tmp_path, monkeypatch):
+    genotypes = pd.DataFrame(
+        [
+            {"cell": "c1", "pos": 100, "alt": "G", "vaf": 0.2, "depth": 10},
+            {"cell": "c2", "pos": 100, "alt": "G", "vaf": 0.8, "depth": 0},
+        ]
+    )
+    gpath = tmp_path / "genotypes.parquet"
+    out_prefix = tmp_path / "nj"
+    genotypes.to_parquet(gpath, index=False)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "build_nj.py",
+            "--genotypes",
+            str(gpath),
+            "--out-prefix",
+            str(out_prefix),
+            "--max-no-overlap-fraction",
+            "0.0",
+        ],
+    )
+    with pytest.raises(SystemExit, match="No-overlap fraction check failed"):
+        build_nj_main()
+
+
+def test_build_nj_no_overlap_safeguard_large_scale_mode(tmp_path, monkeypatch):
+    genotypes = pd.DataFrame(
+        [
+            {"cell": "c1", "pos": 100, "alt": "G", "vaf": 0.2, "depth": 10},
+            {"cell": "c2", "pos": 100, "alt": "G", "vaf": 0.8, "depth": 0},
+        ]
+    )
+    gpath = tmp_path / "genotypes.parquet"
+    out_prefix = tmp_path / "nj"
+    genotypes.to_parquet(gpath, index=False)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "build_nj.py",
+            "--genotypes",
+            str(gpath),
+            "--out-prefix",
+            str(out_prefix),
+            "--distance-format",
+            "condensed",
+            "--large-scale-mode",
+            "--max-no-overlap-fraction",
+            "0.0",
+        ],
+    )
+    with pytest.raises(SystemExit, match="No-overlap fraction check failed"):
+        build_nj_main()
