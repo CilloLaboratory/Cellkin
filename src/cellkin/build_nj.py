@@ -45,6 +45,46 @@ def make_vaf_matrix(df: pd.DataFrame, min_depth_for_call: int = 0) -> Tuple[pd.D
     return vaf, dep, cells, sites
 
 
+def filter_sites_for_distance(
+    vaf: pd.DataFrame,
+    dep: pd.DataFrame,
+    min_site_call_rate: float,
+    min_site_cells: int,
+    min_cohort_vaf: float,
+    max_cohort_vaf: float,
+    min_depth_for_call: int,
+) -> Tuple[pd.DataFrame, pd.DataFrame, int]:
+    n_cells = dep.shape[0]
+    if dep.shape[1] == 0:
+        return vaf, dep, 0
+
+    call_depth = min_depth_for_call if min_depth_for_call > 0 else 1
+    called = dep >= call_depth
+    site_called_cells = called.sum(axis=0)
+    site_call_rate = site_called_cells / max(1, n_cells)
+
+    dep_f = dep.to_numpy(dtype=np.float64, copy=False)
+    vaf_f = vaf.to_numpy(dtype=np.float64, copy=False)
+    numer = np.nansum(vaf_f * dep_f, axis=0)
+    denom = np.sum(dep_f, axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cohort_vaf = np.divide(numer, denom, out=np.zeros_like(numer), where=denom > 0)
+
+    keep = (
+        (site_call_rate.to_numpy() >= min_site_call_rate)
+        & (site_called_cells.to_numpy() >= min_site_cells)
+        & (cohort_vaf >= min_cohort_vaf)
+        & (cohort_vaf <= max_cohort_vaf)
+    )
+
+    kept = int(np.count_nonzero(keep))
+    if kept == dep.shape[1]:
+        return vaf, dep, kept
+
+    cols = dep.columns[keep]
+    return vaf.loc[:, cols], dep.loc[:, cols], kept
+
+
 def _pairwise_block_distance(
     Xi: np.ndarray,
     Di: np.ndarray,
@@ -103,7 +143,7 @@ def pairwise_depth_weighted_absdiff(
     min_depth_pair: int = 0,
     weight_scheme: str = "min",
     block_size: int = 64,
-) -> Tuple[np.ndarray, List[str]]:
+) -> Tuple[np.ndarray, List[str], float, float]:
     """
     Compute pairwise distances between rows (cells):
       d(i,j) = sum_s w_s(i,j) * |vaf_i - vaf_j| / sum_s w_s(i,j)
@@ -118,6 +158,8 @@ def pairwise_depth_weighted_absdiff(
 
     D = np.zeros((n, n), dtype=np.float64)
     max_finite = np.nan
+    no_overlap_pairs = 0
+    total_pairs = (n * (n - 1)) // 2
 
     for i0, i1, j0, j1, block in _iter_distance_blocks(X, Dmat, min_depth_pair, weight_scheme, block_size):
         D[i0:i1, j0:j1] = block
@@ -128,6 +170,7 @@ def pairwise_depth_weighted_absdiff(
             tri = np.triu_indices(block.shape[0], k=1)
             vals = block[tri]
 
+        no_overlap_pairs += int(np.count_nonzero(~np.isfinite(vals)))
         finite = vals[np.isfinite(vals)]
         if finite.size > 0:
             block_max = float(np.max(finite))
@@ -137,7 +180,8 @@ def pairwise_depth_weighted_absdiff(
     fallback = max_finite if np.isfinite(max_finite) else 1.0
     D[~np.isfinite(D)] = fallback
     np.fill_diagonal(D, 0.0)
-    return D, labels
+    no_overlap_fraction = (no_overlap_pairs / total_pairs) if total_pairs > 0 else 0.0
+    return D, labels, no_overlap_fraction, fallback
 
 
 def write_condensed_distance(path: str, D: np.ndarray, labels: List[str]) -> None:
@@ -156,18 +200,21 @@ def stream_condensed_distance(
     min_depth_pair: int,
     weight_scheme: str,
     block_size: int,
-) -> Tuple[int, float]:
+) -> Tuple[int, float, float]:
     X = vaf.to_numpy(dtype=np.float64, copy=False)
     Dmat = dep.to_numpy(dtype=np.float64, copy=False)
     labels = np.asarray(vaf.index.astype(str))
 
     max_finite = np.nan
+    no_overlap_pairs = 0
+    total_pairs = (X.shape[0] * (X.shape[0] - 1)) // 2
     for i0, i1, j0, j1, block in _iter_distance_blocks(X, Dmat, min_depth_pair, weight_scheme, block_size):
         if i0 == j0:
             tri = np.triu_indices(block.shape[0], k=1)
             vals = block[tri]
         else:
             vals = block.ravel()
+        no_overlap_pairs += int(np.count_nonzero(~np.isfinite(vals)))
         finite = vals[np.isfinite(vals)]
         if finite.size > 0:
             block_max = float(np.max(finite))
@@ -204,7 +251,8 @@ def stream_condensed_distance(
     if first:
         pd.DataFrame(columns=["cell_i", "cell_j", "distance"]).to_csv(path, index=False)
 
-    return n_pairs, fallback
+    no_overlap_fraction = (no_overlap_pairs / total_pairs) if total_pairs > 0 else 0.0
+    return n_pairs, fallback, no_overlap_fraction
 
 
 def _system_memory_bytes() -> int | None:
@@ -396,6 +444,30 @@ def main():
         help="Weight for |ΔVAF| per site: min(depth_i,depth_j) (default), harmonic mean, or 1.",
     )
     ap.add_argument(
+        "--min-site-call-rate",
+        type=float,
+        default=0.0,
+        help="Keep only sites called in at least this fraction of cells (0-1), based on depth threshold.",
+    )
+    ap.add_argument(
+        "--min-site-cells",
+        type=int,
+        default=0,
+        help="Keep only sites called in at least this many cells.",
+    )
+    ap.add_argument(
+        "--min-cohort-vaf",
+        type=float,
+        default=0.0,
+        help="Keep only sites with weighted cohort VAF >= this value.",
+    )
+    ap.add_argument(
+        "--max-cohort-vaf",
+        type=float,
+        default=1.0,
+        help="Keep only sites with weighted cohort VAF <= this value.",
+    )
+    ap.add_argument(
         "--distance-format",
         choices=["square", "condensed"],
         default="square",
@@ -423,10 +495,26 @@ def main():
         action="store_true",
         help="Skip NJ tree construction and write an empty placeholder tree (();) to save memory/time.",
     )
+    ap.add_argument(
+        "--max-no-overlap-fraction",
+        type=float,
+        default=1.0,
+        help="Abort if fraction of cell pairs with no overlapping callable sites exceeds this value (0-1).",
+    )
     args = ap.parse_args()
 
     if args.block_size <= 0:
         raise SystemExit("--block-size must be > 0")
+    if not (0.0 <= args.min_site_call_rate <= 1.0):
+        raise SystemExit("--min-site-call-rate must be between 0 and 1")
+    if args.min_site_cells < 0:
+        raise SystemExit("--min-site-cells must be >= 0")
+    if not (0.0 <= args.min_cohort_vaf <= 1.0 and 0.0 <= args.max_cohort_vaf <= 1.0):
+        raise SystemExit("--min-cohort-vaf/--max-cohort-vaf must be between 0 and 1")
+    if args.min_cohort_vaf > args.max_cohort_vaf:
+        raise SystemExit("--min-cohort-vaf cannot be greater than --max-cohort-vaf")
+    if not (0.0 <= args.max_no_overlap_fraction <= 1.0):
+        raise SystemExit("--max-no-overlap-fraction must be between 0 and 1")
 
     if args.large_scale_mode and args.distance_format != "condensed":
         raise SystemExit("--large-scale-mode requires --distance-format condensed")
@@ -446,11 +534,26 @@ def main():
     )
 
     vaf, dep, labels, sites = make_vaf_matrix(df, min_depth_for_call=args.min_depth_for_call)
+    original_sites = dep.shape[1]
+    vaf, dep, kept_sites = filter_sites_for_distance(
+        vaf=vaf,
+        dep=dep,
+        min_site_call_rate=args.min_site_call_rate,
+        min_site_cells=args.min_site_cells,
+        min_cohort_vaf=args.min_cohort_vaf,
+        max_cohort_vaf=args.max_cohort_vaf,
+        min_depth_for_call=args.min_depth_for_call,
+    )
+    if kept_sites == 0:
+        raise SystemExit(
+            "No sites remain after filtering for distance computation. "
+            "Relax --min-site-call-rate/--min-site-cells/--min-cohort-vaf or lower --min-depth-for-call."
+        )
     vaf.to_parquet(f"{args.out_prefix}.vaf_matrix.parquet", index=True)
 
     if args.large_scale_mode:
         distance_path = f"{args.out_prefix}.distance.condensed.csv"
-        n_pairs, fallback = stream_condensed_distance(
+        n_pairs, fallback, no_overlap_fraction = stream_condensed_distance(
             distance_path,
             vaf,
             dep,
@@ -458,21 +561,34 @@ def main():
             weight_scheme=args.weight_scheme,
             block_size=args.block_size,
         )
+        if no_overlap_fraction > args.max_no_overlap_fraction:
+            raise SystemExit(
+                f"No-overlap fraction check failed: {no_overlap_fraction:.4f} > "
+                f"--max-no-overlap-fraction={args.max_no_overlap_fraction:.4f}. "
+                "Increase overlap by relaxing filtering/depth thresholds or lowering this safeguard intentionally."
+            )
         with open(f"{args.out_prefix}.tree.newick", "w") as f:
             f.write("();")
         print(
             f"[nj] large-scale mode enabled; streamed {n_pairs:,} pair distances to {distance_path}; "
-            f"tree generation skipped (wrote placeholder tree). fallback_distance={fallback:.6f}"
+            f"tree generation skipped (wrote placeholder tree). "
+            f"fallback_distance={fallback:.6f} no_overlap_fraction={no_overlap_fraction:.4f}"
         )
         return
 
-    D, labels = pairwise_depth_weighted_absdiff(
+    D, labels, no_overlap_fraction, _fallback = pairwise_depth_weighted_absdiff(
         vaf,
         dep,
         min_depth_pair=args.min_depth_pair,
         weight_scheme=args.weight_scheme,
         block_size=args.block_size,
     )
+    if no_overlap_fraction > args.max_no_overlap_fraction:
+        raise SystemExit(
+            f"No-overlap fraction check failed: {no_overlap_fraction:.4f} > "
+            f"--max-no-overlap-fraction={args.max_no_overlap_fraction:.4f}. "
+            "Increase overlap by relaxing filtering/depth thresholds or lowering this safeguard intentionally."
+        )
 
     if args.distance_format == "square":
         distance_path = f"{args.out_prefix}.distance.csv"
@@ -491,8 +607,9 @@ def main():
             f.write("();")
 
     print(
-        f"[nj] cells={len(labels)} sites={len(sites)}  min_depth_for_call={args.min_depth_for_call}  "
-        f"min_depth_pair={args.min_depth_pair}  weight={args.weight_scheme}"
+        f"[nj] cells={len(labels)} sites={kept_sites}/{original_sites}  min_depth_for_call={args.min_depth_for_call}  "
+        f"min_depth_pair={args.min_depth_pair}  weight={args.weight_scheme}  "
+        f"no_overlap_fraction={no_overlap_fraction:.4f}"
     )
     print(f"[nj] wrote: {args.out_prefix}.vaf_matrix.parquet | {distance_path} | {args.out_prefix}.tree.newick")
 

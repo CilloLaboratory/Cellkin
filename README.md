@@ -88,7 +88,9 @@ cellkin-genotype \
 # Distance matrix can be used for coarse assessment of phylogeny
 cellkin-build-nj \
   --genotypes genotypes.parquet \
-  --out-prefix nj
+  --out-prefix nj \
+  --min-site-call-rate 0.7 \
+  --min-cohort-vaf 0.05
 
 # Optional: identification of clones
 cellkin-clone-phylogeny \
@@ -156,6 +158,30 @@ cellkin-build-nj \
 ```
 
 In `--large-scale-mode`, NJ tree generation is skipped and a placeholder tree (`();`) is written.
+
+To reduce fallback distances driven by sparse coverage, filter to cohort-represented sites:
+
+- `--min-site-call-rate`: minimum fraction of cells with callable depth at a site
+- `--min-site-cells`: minimum number of cells with callable depth
+- `--min-cohort-vaf` / `--max-cohort-vaf`: keep sites in a cohort VAF range
+
+These filters are applied before distance computation and written to `*.vaf_matrix.parquet`.
+
+You can also enforce a hard QC safeguard on pairwise overlap:
+
+- `--max-no-overlap-fraction`: abort if too many cell pairs have no overlapping callable sites
+
+Example:
+
+```bash
+cellkin-build-nj \
+  --genotypes genotypes.parquet \
+  --out-prefix nj \
+  --min-depth-for-call 3 \
+  --min-depth-pair 3 \
+  --min-site-call-rate 0.7 \
+  --max-no-overlap-fraction 0.05
+```
 
 ## Using a cell barcode whitelist
 
