@@ -46,6 +46,7 @@ After installation, these commands are available:
 - `cellkin-genotype`
 - `cellkin-clone-phylogeny`
 - `cellkin-build-nj`
+- `cellkin-nj-prep`
 - `cellkin-qc-report`
 
 Inspect options with `--help`, for example:
@@ -84,10 +85,26 @@ cellkin-genotype \
   --variants variants.parquet \
   --out genotypes.parquet
 
+# Optional but recommended: summarize per-cell NJ input quality and filter low-information cells
+# Report-first mode (no filtering by default)
+cellkin-nj-prep \
+  --pileup pileup.parquet \
+  --genotypes genotypes.parquet \
+  --out-prefix njprep
+
+# Filtered mode with explicit thresholds
+cellkin-nj-prep \
+  --pileup pileup.parquet \
+  --genotypes genotypes.parquet \
+  --out-prefix njprep \
+  --min-cell-total-umi-depth 30 \
+  --min-cell-called-variant-sites 10 \
+  --min-cell-called-variant-fraction 0.2
+
 # Output from this step includes a distance matrix and an nj tree
 # Distance matrix can be used for coarse assessment of phylogeny
 cellkin-build-nj \
-  --genotypes genotypes.parquet \
+  --genotypes njprep.genotypes.filtered.parquet \
   --out-prefix nj \
   --min-site-call-rate 0.7 \
   --min-cohort-vaf 0.05
@@ -111,6 +128,8 @@ Expected outputs include:
 
 - `variants.parquet`: candidate mtDNA variants
 - `genotypes.parquet`: per-cell genotypes and VAF
+- `njprep.cell_qc.tsv`: per-cell depth/callability QC summary (`cellkin-nj-prep`)
+- `njprep.genotypes.filtered.parquet`: filtered genotypes for NJ input (`cellkin-nj-prep`)
 - `clones.tsv`: clone membership summaries
 - `tree.newick`: clone tree
 - `nj.distance.csv` or `nj.distance.condensed.csv`: cell-level pairwise distance matrix (`cellkin-build-nj`)
@@ -184,6 +203,30 @@ cellkin-build-nj \
   --min-site-call-rate 0.7 \
   --max-no-overlap-fraction 0.05
 ```
+
+## NJ input QC and filtering
+
+`cellkin-nj-prep` computes per-cell metrics from `pileup` + `genotypes` and can filter cells before `cellkin-build-nj`.
+
+Per-cell QC columns:
+
+- `cell`
+- `total_umi_depth`
+- `n_positions_with_coverage`
+- `n_variant_sites_called`
+- `fraction_variant_sites_called`
+- `mean_variant_depth`
+- `mean_variant_vaf`
+- `n_nonmissing_gt`
+
+Cell filtering thresholds (all optional, logical AND):
+
+- `--min-cell-total-umi-depth`
+- `--min-cell-covered-positions`
+- `--min-cell-called-variant-sites`
+- `--min-cell-called-variant-fraction`
+- `--min-cell-mean-variant-depth`
+- `--call-depth-for-metrics`
 
 ## Using a cell barcode whitelist
 

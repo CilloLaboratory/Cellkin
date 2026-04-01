@@ -28,6 +28,7 @@ cellkin-variant-call = "cellkin.variant_call:main"
 cellkin-genotype = "cellkin.genotype:main"
 cellkin-clone-phylogeny = "cellkin.clone_phylogeny:main"
 cellkin-build-nj = "cellkin.build_nj:main"
+cellkin-nj-prep = "cellkin.nj_prep:main"
 cellkin-qc-report = "cellkin.qc_report:main"
 
 [tool.setuptools]
