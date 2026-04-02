@@ -16,24 +16,25 @@ The package provides a command-line pipeline to:
 
 ## Installation
 
-### Conda environment (recommended)
+### Python `venv` (recommended)
 
 ```bash
-conda env create -f environment.yml
-conda activate cellkin
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install .
 ```
 
-### Pip only
-
-```bash
-pip install .
-```
-
-For development installs:
+### Development install
 
 ```bash
 pip install -e .
+```
+
+If you previously used the conda workflow, activate your `venv` before running commands:
+
+```bash
+source .venv/bin/activate
 ```
 
 ## Command-line tools
