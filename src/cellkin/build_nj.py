@@ -45,6 +45,48 @@ def make_vaf_matrix(df: pd.DataFrame, min_depth_for_call: int = 0) -> Tuple[pd.D
     return vaf, dep, cells, sites
 
 
+def select_informative_sites(
+    vaf: pd.DataFrame,
+    dep: pd.DataFrame,
+    top_k: int | None,
+    frac: float | None,
+    min_cells_per_site: int = 0,
+    metric: str = "var",
+) -> Tuple[pd.DataFrame, pd.DataFrame, List[str]]:
+    if top_k is None and (frac is None or frac <= 0 or frac >= 1):
+        return vaf, dep, list(vaf.columns.astype(str))
+
+    counts = np.isfinite(vaf.to_numpy()).sum(axis=0)
+    if min_cells_per_site > 0:
+        keep_mask = counts >= min_cells_per_site
+    else:
+        keep_mask = np.ones(vaf.shape[1], dtype=bool)
+
+    X = vaf.to_numpy(dtype=np.float64, copy=False)
+    if metric == "var":
+        means = np.nanmean(X, axis=0)
+        score = np.nanmean((X - means) ** 2, axis=0)
+    elif metric == "mad":
+        med = np.nanmedian(X, axis=0)
+        score = np.nanmedian(np.abs(X - med), axis=0)
+    else:
+        raise ValueError(f"Unknown informative-site metric: {metric}")
+
+    score[~keep_mask] = -np.inf
+    if frac is not None and (0 < frac < 1):
+        k = max(1, int(round(frac * vaf.shape[1])))
+    else:
+        k = top_k if top_k is not None else vaf.shape[1]
+    k = min(k, vaf.shape[1])
+    if k <= 0:
+        return vaf.iloc[:, []], dep.iloc[:, []], []
+
+    idx = np.argpartition(-score, kth=k - 1)[:k]
+    idx = idx[np.argsort(-score[idx])]
+    cols = vaf.columns[idx]
+    return vaf.loc[:, cols], dep.loc[:, cols], list(cols.astype(str))
+
+
 def filter_sites_for_distance(
     vaf: pd.DataFrame,
     dep: pd.DataFrame,
@@ -444,6 +486,30 @@ def main():
         help="Weight for |ΔVAF| per site: min(depth_i,depth_j) (default), harmonic mean, or 1.",
     )
     ap.add_argument(
+        "--sites-informative-k",
+        type=int,
+        default=None,
+        help="Old-model site selection: keep top-K most variable sites.",
+    )
+    ap.add_argument(
+        "--sites-informative-frac",
+        type=float,
+        default=None,
+        help="Old-model site selection: keep top fraction (0..1) most variable sites.",
+    )
+    ap.add_argument(
+        "--min-cells-per-site",
+        type=int,
+        default=0,
+        help="Old-model site selection: require at least this many finite-VAF cells at a site.",
+    )
+    ap.add_argument(
+        "--informative-metric",
+        choices=["var", "mad"],
+        default="var",
+        help="Old-model site informativeness metric.",
+    )
+    ap.add_argument(
         "--min-site-call-rate",
         type=float,
         default=0.0,
@@ -505,6 +571,12 @@ def main():
 
     if args.block_size <= 0:
         raise SystemExit("--block-size must be > 0")
+    if args.sites_informative_k is not None and args.sites_informative_k <= 0:
+        raise SystemExit("--sites-informative-k must be > 0")
+    if args.sites_informative_frac is not None and not (0 < args.sites_informative_frac < 1):
+        raise SystemExit("--sites-informative-frac must be between 0 and 1")
+    if args.min_cells_per_site < 0:
+        raise SystemExit("--min-cells-per-site must be >= 0")
     if not (0.0 <= args.min_site_call_rate <= 1.0):
         raise SystemExit("--min-site-call-rate must be between 0 and 1")
     if args.min_site_cells < 0:
@@ -534,7 +606,19 @@ def main():
     )
 
     vaf, dep, labels, sites = make_vaf_matrix(df, min_depth_for_call=args.min_depth_for_call)
-    original_sites = dep.shape[1]
+    sites_total = dep.shape[1]
+
+    # Reintroduced old-model informative site selection (variance/MAD ranking).
+    vaf, dep, informative_sites = select_informative_sites(
+        vaf=vaf,
+        dep=dep,
+        top_k=args.sites_informative_k,
+        frac=args.sites_informative_frac,
+        min_cells_per_site=args.min_cells_per_site,
+        metric=args.informative_metric,
+    )
+
+    # Keep newer cohort/site-call filters as optional extra gating.
     vaf, dep, kept_sites = filter_sites_for_distance(
         vaf=vaf,
         dep=dep,
@@ -547,7 +631,7 @@ def main():
     if kept_sites == 0:
         raise SystemExit(
             "No sites remain after filtering for distance computation. "
-            "Relax --min-site-call-rate/--min-site-cells/--min-cohort-vaf or lower --min-depth-for-call."
+            "Relax informative/site-call/cohort filters or lower --min-depth-for-call."
         )
     vaf.to_parquet(f"{args.out_prefix}.vaf_matrix.parquet", index=True)
 
@@ -607,7 +691,8 @@ def main():
             f.write("();")
 
     print(
-        f"[nj] cells={len(labels)} sites={kept_sites}/{original_sites}  min_depth_for_call={args.min_depth_for_call}  "
+        f"[nj] cells={len(labels)} sites={kept_sites}/{sites_total} (post-informative+cohort filters)  "
+        f"min_depth_for_call={args.min_depth_for_call}  "
         f"min_depth_pair={args.min_depth_pair}  weight={args.weight_scheme}  "
         f"no_overlap_fraction={no_overlap_fraction:.4f}"
     )

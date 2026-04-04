@@ -229,6 +229,15 @@ Cell filtering thresholds (all optional, logical AND):
 - `--min-cell-mean-variant-depth`
 - `--call-depth-for-metrics`
 
+`cellkin-build-nj` also supports the older informative-site selection model:
+
+- `--sites-informative-k`
+- `--sites-informative-frac`
+- `--min-cells-per-site`
+- `--informative-metric {var,mad}`
+
+These are applied before the newer cohort/site-call filters.
+
 ## Using a cell barcode whitelist
 
 `cellkin-extract-chrm` supports barcode filtering directly:
