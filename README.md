@@ -107,6 +107,7 @@ cellkin-nj-prep \
 cellkin-build-nj \
   --genotypes njprep.genotypes.filtered.parquet \
   --out-prefix nj \
+  --distance-metric weighted_absdiff \
   --min-site-call-rate 0.7 \
   --min-cohort-vaf 0.05
 
@@ -237,6 +238,11 @@ Cell filtering thresholds (all optional, logical AND):
 - `--informative-metric {var,mad}`
 
 These are applied before the newer cohort/site-call filters.
+
+Distance metric options:
+
+- `--distance-metric weighted_absdiff` (default): depth-weighted mean absolute VAF difference.
+- `--distance-metric euclidean_r`: R `dist()`-style Euclidean distance on pairwise-complete VAFs with missingness scaling.
 
 ## Using a cell barcode whitelist
 

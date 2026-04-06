@@ -159,23 +159,49 @@ def _pairwise_block_distance(
     return out
 
 
+def _pairwise_block_distance_euclidean_r(Xi: np.ndarray, Xj: np.ndarray, p_total: int) -> np.ndarray:
+    """
+    R dist(..., method='euclidean') behavior with missing values:
+    - compute Euclidean on pairwise-complete dimensions
+    - scale sum of squares by (p_total / p_observed)
+    """
+    finite = np.isfinite(Xi)[:, None, :] & np.isfinite(Xj)[None, :, :]
+    diff = Xi[:, None, :] - Xj[None, :, :]
+    sq = np.where(finite, diff * diff, 0.0)
+    sum_sq = np.sum(sq, axis=2)
+    p_obs = np.sum(finite, axis=2)
+
+    out = np.full(sum_sq.shape, np.nan, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scaled = np.sqrt(sum_sq * (p_total / np.maximum(p_obs, 1)))
+    np.copyto(out, scaled, where=p_obs > 0)
+    return out
+
+
 def _iter_distance_blocks(
     X: np.ndarray,
     Dmat: np.ndarray,
     min_depth_pair: int,
     weight_scheme: str,
     block_size: int,
+    distance_metric: str,
 ):
     n = X.shape[0]
+    p_total = X.shape[1]
     for i0 in range(0, n, block_size):
         i1 = min(i0 + block_size, n)
         Xi = X[i0:i1]
-        Di = Dmat[i0:i1]
+        Di = Dmat[i0:i1] if Dmat is not None else None
         for j0 in range(i0, n, block_size):
             j1 = min(j0 + block_size, n)
             Xj = X[j0:j1]
-            Dj = Dmat[j0:j1]
-            block = _pairwise_block_distance(Xi, Di, Xj, Dj, min_depth_pair, weight_scheme)
+            Dj = Dmat[j0:j1] if Dmat is not None else None
+            if distance_metric == "weighted_absdiff":
+                block = _pairwise_block_distance(Xi, Di, Xj, Dj, min_depth_pair, weight_scheme)
+            elif distance_metric == "euclidean_r":
+                block = _pairwise_block_distance_euclidean_r(Xi, Xj, p_total)
+            else:
+                raise ValueError(f"Unknown distance metric: {distance_metric}")
             yield i0, i1, j0, j1, block
 
 
@@ -185,6 +211,7 @@ def pairwise_depth_weighted_absdiff(
     min_depth_pair: int = 0,
     weight_scheme: str = "min",
     block_size: int = 64,
+    distance_metric: str = "weighted_absdiff",
 ) -> Tuple[np.ndarray, List[str], float, float]:
     """
     Compute pairwise distances between rows (cells):
@@ -194,7 +221,7 @@ def pairwise_depth_weighted_absdiff(
     Returns (D, labels)
     """
     X = vaf.to_numpy(dtype=np.float64, copy=False)
-    Dmat = dep.to_numpy(dtype=np.float64, copy=False)
+    Dmat = dep.to_numpy(dtype=np.float64, copy=False) if distance_metric == "weighted_absdiff" else None
     n = X.shape[0]
     labels = list(vaf.index.astype(str))
 
@@ -203,7 +230,9 @@ def pairwise_depth_weighted_absdiff(
     no_overlap_pairs = 0
     total_pairs = (n * (n - 1)) // 2
 
-    for i0, i1, j0, j1, block in _iter_distance_blocks(X, Dmat, min_depth_pair, weight_scheme, block_size):
+    for i0, i1, j0, j1, block in _iter_distance_blocks(
+        X, Dmat, min_depth_pair, weight_scheme, block_size, distance_metric
+    ):
         D[i0:i1, j0:j1] = block
         if i0 != j0:
             D[j0:j1, i0:i1] = block.T
@@ -242,15 +271,18 @@ def stream_condensed_distance(
     min_depth_pair: int,
     weight_scheme: str,
     block_size: int,
+    distance_metric: str,
 ) -> Tuple[int, float, float]:
     X = vaf.to_numpy(dtype=np.float64, copy=False)
-    Dmat = dep.to_numpy(dtype=np.float64, copy=False)
+    Dmat = dep.to_numpy(dtype=np.float64, copy=False) if distance_metric == "weighted_absdiff" else None
     labels = np.asarray(vaf.index.astype(str))
 
     max_finite = np.nan
     no_overlap_pairs = 0
     total_pairs = (X.shape[0] * (X.shape[0] - 1)) // 2
-    for i0, i1, j0, j1, block in _iter_distance_blocks(X, Dmat, min_depth_pair, weight_scheme, block_size):
+    for i0, i1, j0, j1, block in _iter_distance_blocks(
+        X, Dmat, min_depth_pair, weight_scheme, block_size, distance_metric
+    ):
         if i0 == j0:
             tri = np.triu_indices(block.shape[0], k=1)
             vals = block[tri]
@@ -267,7 +299,9 @@ def stream_condensed_distance(
 
     first = True
     n_pairs = 0
-    for i0, i1, j0, j1, block in _iter_distance_blocks(X, Dmat, min_depth_pair, weight_scheme, block_size):
+    for i0, i1, j0, j1, block in _iter_distance_blocks(
+        X, Dmat, min_depth_pair, weight_scheme, block_size, distance_metric
+    ):
         if i0 == j0:
             tri_i, tri_j = np.triu_indices(block.shape[0], k=1)
             if tri_i.size == 0:
@@ -486,6 +520,12 @@ def main():
         help="Weight for |ΔVAF| per site: min(depth_i,depth_j) (default), harmonic mean, or 1.",
     )
     ap.add_argument(
+        "--distance-metric",
+        choices=["weighted_absdiff", "euclidean_r"],
+        default="weighted_absdiff",
+        help="Distance metric: existing depth-weighted absolute difference, or R dist()-style euclidean with NA scaling.",
+    )
+    ap.add_argument(
         "--sites-informative-k",
         type=int,
         default=None,
@@ -644,6 +684,7 @@ def main():
             min_depth_pair=args.min_depth_pair,
             weight_scheme=args.weight_scheme,
             block_size=args.block_size,
+            distance_metric=args.distance_metric,
         )
         if no_overlap_fraction > args.max_no_overlap_fraction:
             raise SystemExit(
@@ -666,6 +707,7 @@ def main():
         min_depth_pair=args.min_depth_pair,
         weight_scheme=args.weight_scheme,
         block_size=args.block_size,
+        distance_metric=args.distance_metric,
     )
     if no_overlap_fraction > args.max_no_overlap_fraction:
         raise SystemExit(
@@ -693,7 +735,7 @@ def main():
     print(
         f"[nj] cells={len(labels)} sites={kept_sites}/{sites_total} (post-informative+cohort filters)  "
         f"min_depth_for_call={args.min_depth_for_call}  "
-        f"min_depth_pair={args.min_depth_pair}  weight={args.weight_scheme}  "
+        f"min_depth_pair={args.min_depth_pair}  metric={args.distance_metric}  weight={args.weight_scheme}  "
         f"no_overlap_fraction={no_overlap_fraction:.4f}"
     )
     print(f"[nj] wrote: {args.out_prefix}.vaf_matrix.parquet | {distance_path} | {args.out_prefix}.tree.newick")

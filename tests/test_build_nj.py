@@ -1,5 +1,6 @@
 import pandas as pd
 import pytest
+import numpy as np
 
 from cellkin.build_nj import main as build_nj_main
 
@@ -191,3 +192,39 @@ def test_build_nj_no_overlap_safeguard_large_scale_mode(tmp_path, monkeypatch):
     )
     with pytest.raises(SystemExit, match="No-overlap fraction check failed"):
         build_nj_main()
+
+
+def test_build_nj_euclidean_r_metric(tmp_path, monkeypatch):
+    genotypes = pd.DataFrame(
+        [
+            {"cell": "c1", "pos": 100, "alt": "G", "vaf": 0.2, "depth": 10},
+            {"cell": "c2", "pos": 100, "alt": "G", "vaf": 0.9, "depth": 10},
+            {"cell": "c1", "pos": 200, "alt": "T", "vaf": 0.4, "depth": 10},
+            {"cell": "c2", "pos": 200, "alt": "T", "vaf": np.nan, "depth": 0},
+        ]
+    )
+    gpath = tmp_path / "genotypes.parquet"
+    out_prefix = tmp_path / "nj"
+    genotypes.to_parquet(gpath, index=False)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "build_nj.py",
+            "--genotypes",
+            str(gpath),
+            "--out-prefix",
+            str(out_prefix),
+            "--distance-format",
+            "condensed",
+            "--distance-metric",
+            "euclidean_r",
+        ],
+    )
+    build_nj_main()
+
+    d = pd.read_csv(tmp_path / "nj.distance.condensed.csv")
+    # One shared observed site out of two total columns:
+    # sqrt((0.9-0.2)^2 * (2/1)) = sqrt(0.49*2)
+    expected = np.sqrt(0.98)
+    assert np.isclose(float(d.loc[0, "distance"]), expected)
